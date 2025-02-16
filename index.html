@@ -291,8 +291,12 @@ return betWays;
             rect.setAttribute("height", rectHeight);
             const fillColor = (o.asset < initialAsset) ? "#A5D6A7" : "#4CAF50";
             rect.setAttribute("fill", fillColor);
-            rect.setAttribute("stroke", "#333");
-            rect.setAttribute("stroke-width", "1");
+            if (rectWidth > 5){
+              rect.setAttribute("stroke", "#333");
+              rect.setAttribute("stroke-width", "1");
+            } else {
+              rect.setAttribute("stroke", "none");
+            }
             rect.setAttribute("title", "資産: " + o.asset + "\n確率: " + (o.probability * 100).toFixed(2) + "%");
             svg.appendChild(rect);
             xCursor += rectWidth;
