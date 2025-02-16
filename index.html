@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>Betting Simulator</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/water.min.css">
+  <style>
+    body { max-width: none; }
+    body {
+      display: flex;
+      margin: 0;
+      height: 100vh;
+      box-sizing: border-box;
+    }
+    #editor {
+      width: 30%;
+      padding: 1em;
+      box-sizing: border-box;
+      overflow-y: auto;
+    }
+    #visualization {
+      width: 70%;
+      padding: 1em;
+      box-sizing: border-box;
+      overflow: auto;
+    }
+    textarea {
+      width: 100%;
+      height: 300px;
+      box-sizing: border-box;
+    }
+    input, button {
+      margin: 0.5em 0;
+    }
+    #chart {
+      width: 100%;
+      border: 1px solid #ccc;
+    }
+  </style>
+</head>
+<body>
+  <!-- エディタ側 (30%) -->
+  <div id="editor">
+    <h2>Betting Simulator</h2>
+    <textarea id="strategyCode">
+/* 共通定数: baseBet は初期資金の10% */
+var baseBet = initialAsset * 0.1;
+
+/* 固定額戦略: 常にbaseBet */
+var fixedBet = function(currentAsset, previousResult, previousState) {
+  return { bet: baseBet, nextState: null };
+};
+fixedBet.name = "fixedBet";
+
+/* マーチンゲール法: 負けるたびに2倍・4倍に上昇 */
+var martingale = function(currentAsset, previousResult, previousState) {
+  // 前回負けたなら前回賭け金の2倍、それがあれば4倍（単純に2倍ずつ）
+  var bet = baseBet;
+  if(previousResult === "lose" && previousState !== null) {
+    bet = previousState * 2;
+  }
+  return { bet: bet, nextState: bet };
+};
+martingale.name = "martingale";
+
+/* 逆マーチンゲール法: 勝つたびに賭け金が2倍、4倍になり、5連勝で1倍にリセット */
+var reverseMartingale = function(currentAsset, previousResult, previousState) {
+  var winStreak = previousState || 1; // 初回は1倍
+  if(previousResult === "win") { winStreak++; } else { winStreak = 1; }
+  var bet = baseBet;
+  if(winStreak >= 2) { bet = baseBet * 2; }
+  else if(winStreak >= 5) { bet = baseBet; winStreak = 1; }
+  return { bet: bet, nextState: winStreak };
+};
+reverseMartingale.name = "reverseMartingale";
+
+/* 1-2-3モンテカルロ法:
+   シーケンスの両端の和を賭け、負けたらその額を右に加え、勝ったら両端を削除。
+   シーケンスが1つ以下なら再初期化（1,2,3）。
+*/
+var monteCarloBet = function(currentAsset, previousResult, previousState) {
+  var seq = previousState || [1,2,3];
+  var bet = seq[0] + seq[seq.length - 1];
+  if(previousResult === "win") {
+    seq.shift();
+    seq.pop();
+    if(seq.length < 2) { seq = [1,2,3]; }
+  } else {
+    seq.push(bet);
+  }
+  return { bet: bet * baseBet * 0.25, nextState: seq };
+};
+monteCarloBet.name = "monteCarloBet";
+
+/* 戻り値としてbetWays配列を返す */
+var betWays = [fixedBet, martingale, reverseMartingale, monteCarloBet];
+return betWays;
+    </textarea>
+    <h3>パラメータ</h3>
+    <!-- 初期資産は100、勝率は0.45、倍率は2、ラウンド数は30 -->
+    <label>初期資産: <input type="number" id="initialAsset" value="100"></label><br>
+    <label>勝率: <input type="number" id="hitRate" value="0.45" step="0.01"></label><br>
+    <label>倍率: <input type="number" id="multiplier" value="2" step="0.1"></label><br>
+    <label>ラウンド数: <input type="number" id="rounds" value="30"></label><br>
+    <label>全探索閾値: <input type="number" id="exhaustiveThreshold" value="1024"></label><br>
+    <label>MC回数: <input type="number" id="simulationCount" value="10000"></label><br>
+    <label>行高さ (px): <input type="number" id="rowHeight" value="80"></label><br>
+    <label>除外確率幅: <input type="number" id="exclusionThreshold" value="0.005" step="0.001"></label><br>
+    <button id="runSim">実行</button>
+    <p><a href="//wass80.xyz"><small>by wass</small></a></p>
+  </div>
+  
+  <!-- チャート側 (70%) -->
+  <div id="visualization">
+    <h2>結果（各戦略・各ラウンド）</h2>
+    <svg id="chart"></svg>
+  </div>
+  
+  <script>
+    // 初回実行 & ボタン押下でシミュレーション開始
+    function runSimulator() {
+      window.initialAsset = parseFloat(document.getElementById('initialAsset').value);
+      const hitRate = parseFloat(document.getElementById('hitRate').value);
+      const multiplier = parseFloat(document.getElementById('multiplier').value);
+      const rounds = parseInt(document.getElementById('rounds').value);
+      const exhaustiveThreshold = parseInt(document.getElementById('exhaustiveThreshold').value);
+      const simulationCount = parseInt(document.getElementById('simulationCount').value);
+      const rowHeightOpt = parseInt(document.getElementById('rowHeight').value);
+      const exclusionThreshold = parseFloat(document.getElementById('exclusionThreshold').value);
+      let userBetWays;
+      try {
+        userBetWays = new Function(document.getElementById('strategyCode').value)();
+        if (!Array.isArray(userBetWays) || userBetWays.length === 0) {
+          alert('betWays配列エラー');
+          return;
+        }
+      } catch(e) {
+        alert('戦略コード評価エラー');
+        return;
+      }
+      const results = runSimForBetWays(window.initialAsset, hitRate, multiplier, rounds, exhaustiveThreshold, simulationCount, userBetWays);
+      renderSVGChart(results, window.initialAsset, rowHeightOpt, exclusionThreshold, userBetWays);
+    }
+    document.getElementById('runSim').addEventListener('click', runSimulator);
+    window.addEventListener('DOMContentLoaded', runSimulator);
+    
+    // 各戦略ごとにシミュレーションを実行
+    function runSimForBetWays(initialAsset, hitRate, multiplier, rounds, exhaustiveThreshold, simulationCount, betWays) {
+      return betWays.map(strategy => runSimulation(initialAsset, hitRate, multiplier, rounds, exhaustiveThreshold, simulationCount, strategy));
+    }
+    
+    // シミュレーション本体 (全探索 or Monte Carlo)
+    function runSimulation(initialAsset, hitRate, multiplier, rounds, exhaustiveThreshold, simulationCount, bettingStrategy) {
+      const exhaustivePossible = Math.pow(2, rounds) <= exhaustiveThreshold;
+      let roundsData = [];
+      if (exhaustivePossible) {
+        roundsData[0] = [{ asset: initialAsset, probability: 1, previousResult: null, previousState: null }];
+        for (let r = 0; r < rounds; r++) {
+          let next = [];
+          roundsData[r].forEach(state => {
+            let { bet, nextState } = bettingStrategy(state.asset, state.previousResult, state.previousState);
+            bet = Math.min(bet, state.asset);
+            let winAsset = state.asset - bet + bet * multiplier;
+            next.push({ asset: winAsset, probability: state.probability * hitRate });
+            let loseAsset = state.asset - bet;
+            next.push({ asset: loseAsset, probability: state.probability * (1 - hitRate) });
+          });
+          roundsData[r+1] = groupOutcomes(next);
+        }
+        return roundsData;
+      } else {
+        let simulation = [];
+        for (let r = 0; r <= rounds; r++) simulation[r] = [];
+        for (let i = 0; i < simulationCount; i++) {
+          let currentAsset = initialAsset, previousResult = null, previousState = null;
+          simulation[0].push(currentAsset);
+          for (let r = 0; r < rounds; r++) {
+            let { bet, nextState } = bettingStrategy(currentAsset, previousResult, previousState);
+            bet = Math.min(bet, currentAsset);
+            if (Math.random() < hitRate) { currentAsset = currentAsset - bet + bet * multiplier; previousResult = 'win'; }
+            else { currentAsset = currentAsset - bet; previousResult = 'lose'; }
+            previousState = nextState;
+            simulation[r+1].push(currentAsset);
+          }
+        }
+        let grouped = [];
+        for (let r = 0; r <= rounds; r++) {
+          grouped[r] = groupMonteCarlo(simulation[r], simulationCount);
+        }
+        return grouped;
+      }
+    }
+    
+    function groupOutcomes(outcomes) {
+      const groups = {};
+      outcomes.forEach(o => {
+        const key = o.asset.toFixed(2);
+        if (!groups[key]) groups[key] = { asset: parseFloat(key), probability: 0 };
+        groups[key].probability += o.probability;
+      });
+      let arr = Object.values(groups);
+      arr.sort((a, b) => b.asset - a.asset);
+      return arr;
+    }
+    
+    function groupMonteCarlo(assets, simulationCount) {
+      const groups = {};
+      assets.forEach(a => {
+        const key = a.toFixed(2);
+        if (!groups[key]) groups[key] = { asset: parseFloat(key), probability: 0 };
+        groups[key].probability += 1;
+      });
+      for (let key in groups) groups[key].probability /= simulationCount;
+      let arr = Object.values(groups);
+      arr.sort((a, b) => b.asset - a.asset);
+      return arr;
+    }
+    
+    // SVG描画
+    // 各戦略を列、各ラウンドを行に配置。globalスケールは、除外対象 (probability < exclusionThreshold) を除いたdrawn outcomesから算出。
+    // 各ラウンドに初期資産ガイドラインを描画。除外分の情報 (合計確率, 期待値, 最大資産) は左下内側に、白縁取り黒太字(ストローク0.5)で表示。
+    function renderSVGChart(results, initialAsset, rowHeightOpt, exclusionThreshold, betWays) {
+      const svg = document.getElementById('chart');
+      const svgWidth = svg.clientWidth;
+      const numStrategies = results.length;
+      const rounds = results[0].length;
+      let allDrawn = [];
+      results.forEach(dist => {
+        dist.forEach(round => {
+          allDrawn = allDrawn.concat(round.filter(o => o.probability >= exclusionThreshold));
+        });
+      });
+      let globalMax = allDrawn.reduce((max, o) => Math.max(max, o.asset), 0);
+      // SVGの高さは全ラウンドで共通のスケール (除外分布のみで計算)
+      const svgHeight = rowHeightOpt * rounds;
+      svg.setAttribute("height", svgHeight);
+      svg.innerHTML = '';
+      
+      // ヘッダー: 各戦略の英語関数名を各列上部に表示
+      const colWidth = svgWidth / numStrategies;
+      betWays.forEach((strategy, i) => {
+        const header = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        header.setAttribute("x", colWidth * i + 5);
+        header.setAttribute("y", 15);
+        header.setAttribute("fill", "#000");
+        header.setAttribute("font-size", "14px");
+        header.setAttribute("font-weight", "bold");
+        header.setAttribute("stroke", "#fff");
+        header.setAttribute("stroke-width", "0.5");
+        header.textContent = strategy.name;
+        svg.appendChild(header);
+      });
+      
+      // 各ラウンド・各戦略の描画
+      for (let r = 0; r < rounds; r++) {
+        for (let i = 0; i < numStrategies; i++) {
+          const dist = results[i][r];
+          const xOffset = i * colWidth;
+          const yBase = r * rowHeightOpt;
+          if (globalMax > 0) {
+            const guideY = yBase + rowHeightOpt - (initialAsset / globalMax * rowHeightOpt);
+            const guide = document.createElementNS("http://www.w3.org/2000/svg", "line");
+            guide.setAttribute("x1", xOffset);
+            guide.setAttribute("y1", guideY);
+            guide.setAttribute("x2", xOffset + colWidth);
+            guide.setAttribute("y2", guideY);
+            guide.setAttribute("stroke", "#F44336");
+            guide.setAttribute("stroke-dasharray", "4");
+            svg.appendChild(guide);
+          }
+          let cumProb = 0;
+          let cutIndex = 0;
+          for (let i = 0; i < dist.length; i++) {
+            cumProb += dist[i].probability;
+            if (cumProb > exclusionThreshold) {
+              cutIndex = (i === 0) ? 0 : i;
+              break;
+            }
+          }
+          const excluded = dist.slice(0, cutIndex);
+          const drawn = dist.slice(cutIndex);
+          let xCursor = xOffset;
+          drawn.forEach(o => {
+            const rectWidth = o.probability * colWidth;
+            const rectHeight = (o.asset / globalMax) * rowHeightOpt;
+            const y = yBase + rowHeightOpt - rectHeight;
+            const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+            rect.setAttribute("x", xCursor);
+            rect.setAttribute("y", y);
+            rect.setAttribute("width", rectWidth);
+            rect.setAttribute("height", rectHeight);
+            const fillColor = (o.asset < initialAsset) ? "#A5D6A7" : "#4CAF50";
+            rect.setAttribute("fill", fillColor);
+            rect.setAttribute("stroke", "#333");
+            rect.setAttribute("stroke-width", "1");
+            rect.setAttribute("title", "資産: " + o.asset + "\n確率: " + (o.probability * 100).toFixed(2) + "%");
+            svg.appendChild(rect);
+            xCursor += rectWidth;
+          });
+          if (excluded.length > 0) {
+            const totalExcluded = excluded.reduce((sum, o) => sum + o.probability, 0);
+            const expected = excluded.reduce((sum, o) => sum + o.probability * o.asset, 0) / totalExcluded;
+            const maxExcluded = Math.max(...excluded.map(o => o.asset));
+            const infoText = "除外=" + totalExcluded.toFixed(3) +
+                             " 最大=" + maxExcluded.toFixed(2)+
+                             " 期待=" + expected.toFixed(2);
+            const textElem = document.createElementNS("http://www.w3.org/2000/svg", "text");
+            textElem.setAttribute("x", xOffset + 5);
+            textElem.setAttribute("y", yBase + rowHeightOpt - 5);
+            textElem.setAttribute("fill", "#000");
+            textElem.setAttribute("font-size", "12px");
+            textElem.setAttribute("font-weight", "bold");
+            textElem.setAttribute("stroke", "#fff");
+            textElem.setAttribute("stroke-width", "0.5");
+            textElem.textContent = infoText;
+            svg.appendChild(textElem);
+          }
+        }
+      }
+    }
+  </script>
+</body>
+</html>
